@@ -1,0 +1,291 @@
+
+import pandas as pd 
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForQuestionAnswering
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import torch
+from tqdm import tqdm
+from typing import List, Dict
+import evaluate
+from dataclasses import dataclass
+from sklearn.metrics.pairwise import cosine_similarity
+
+@dataclass
+class Document:
+    """Simple document class to store text and metadata"""
+    page_content: str
+    metadata: Dict
+
+class SimpleVectorStore:
+    """Basic vector store implementation using numpy"""
+    def __init__(self):
+        self.embeddings = []
+        self.documents = []
+        
+    def add_texts(self, texts: List[str], embeddings: List[List[float]], metadatas: List[Dict] = None):
+        """Add texts and their embeddings to the store"""
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+            
+        self.embeddings.extend(embeddings)
+        for text, metadata in zip(texts, metadatas):
+            self.documents.append(Document(page_content=text, metadata=metadata))
+            
+        # Convert embeddings to numpy array for efficient similarity search
+        self.embeddings_array = np.array(self.embeddings)
+        
+    def similarity_search(self, query_embedding: List[float], k: int = 3) -> List[Document]:
+        """Find k most similar documents using cosine similarity"""
+        query_embedding = np.array(query_embedding).reshape(1, -1)
+            
+        # Debugging: Check for NaN in query_embedding
+        if np.isnan(query_embedding).any():
+            raise ValueError("query_embedding contains NaN values.")
+        
+        # Debugging: Check for NaN in embeddings_array
+        if np.isnan(self.embeddings_array).any():
+            raise ValueError("self.embeddings_array contains NaN values.")
+        
+        # Calculate cosine similarities
+        similarities = cosine_similarity(query_embedding, self.embeddings_array)[0]
+        
+        # Get top k indices
+        top_k_indices = np.argsort(similarities)[-k:][::-1]
+        
+        # Return corresponding documents
+        return [self.documents[i] for i in top_k_indices]
+    
+class CustomLlamaEmbeddings:
+    def __init__(self, model_path, tokenizer_path, device_map={"": 2}):
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            use_fast=True
+        )
+
+        # Set up padding token for Llama tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print("Set pad_token to eos_token:", self.tokenizer.pad_token)
+
+        self.model = AutoModelForQuestionAnswering.from_pretrained(
+            model_path,
+            device_map=device_map, 
+            pad_token_id=self.tokenizer.pad_token_id, 
+            ignore_mismatched_sizes=True
+        )
+
+        # Resize token embeddings if needed
+        if self.model.config.pad_token_id is None:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
+            
+        self.device = next(self.model.parameters()).device
+        
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for a list of texts"""
+        embeddings = []
+        batch_size = 1  
+
+        for i in range(0, len(texts), batch_size):
+            batch = [text.strip() for text in texts[i:i + batch_size] if text.strip()]
+
+            if not batch: 
+                continue
+            
+            # Tokenize
+            inputs = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=128,
+                return_tensors="pt"
+            ).to(self.device)
+           
+
+            # Check input tensors for NaNs
+            if torch.isnan(inputs['input_ids']).any():
+                raise ValueError("Input IDs contain NaN values.")
+            if torch.isnan(inputs['attention_mask']).any():
+                raise ValueError("Attention mask contains NaN values.")
+            
+            # Get model's hidden states
+            with torch.no_grad():
+                outputs = self.model(**inputs, output_hidden_states=True)
+                last_hidden_state = outputs.hidden_states[-1]
+                # Check last hidden state for NaNs
+                if torch.isnan(last_hidden_state).any():
+                    raise ValueError("Last hidden state contains NaN values.")
+
+                # Mean pooling over sequence length
+                attention_mask = inputs['attention_mask'].unsqueeze(-1)
+
+                # Avoid division by zero
+                mask_sum = torch.sum(attention_mask, dim=1)
+                mask_sum[mask_sum == 0] = 1  # Replace 0s with 1s
+
+
+                embeddings_batch = torch.sum(last_hidden_state * attention_mask, dim=1) / torch.sum(attention_mask, dim=1)
+                if torch.isnan(embeddings_batch).any():
+                    raise ValueError("NaN detected in embeddings batch.")
+
+                embeddings.extend(embeddings_batch.cpu().numpy())
+            
+        # Debugging: Check for NaN in embeddings
+        if not embeddings:
+            raise ValueError("No embeddings generated.")
+        return embeddings
+
+    def embed_query(self, text: str) -> List[float]:
+        """Generate embeddings for a single query"""
+        return self.embed_documents([text])[0]
+    
+class SQuADRAGEvaluator:
+    def __init__(self, model_path, gpu_id=5):
+        # Set specific GPU device
+        if torch.cuda.is_available():
+            self.device = torch.device(f'cuda:{gpu_id}')
+            torch.cuda.set_device(gpu_id)
+        else:
+            self.device = torch.device('cpu')
+            
+        # Initialize custom embeddings
+        self.embeddings = CustomLlamaEmbeddings(
+            model_path=model_path,
+            tokenizer_path=model_path,
+            device_map=gpu_id
+        )
+        
+        # Get device from model
+        self.device = next(self.embeddings.model.parameters()).device
+        print(f"Using device: {self.device}")
+            
+        # Initialize text splitter
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            length_function=len,
+        )
+        
+        # Use the same model for QA
+        self.model = self.embeddings.model
+        self.tokenizer = self.embeddings.tokenizer
+            
+        # Initialize evaluation metrics
+        self.exact_match_metric = evaluate.load("exact_match")
+        
+        
+
+    def prepare_vector_store(self, df):
+        """Create vector store from documents"""
+        unique_docs = df[['title', 'context']].drop_duplicates()
+        
+        documents = []
+        metadatas = []
+        
+        for _, row in unique_docs.iterrows():
+            if not row['context'] or pd.isnull(row['context']):
+                continue
+            chunks = self.text_splitter.split_text(row['context'])
+            documents.extend(chunks)
+            metadatas.extend([{"title": row['title']} for _ in chunks])
+        
+        # Create embeddings for all documents
+        document_embeddings = self.embeddings.embed_documents(documents)
+
+        if len(document_embeddings) == 0:
+            raise ValueError("No valid document embeddings were generated.")
+        
+
+        # Initialize and populate vector store
+        vector_store = SimpleVectorStore()
+        vector_store.add_texts(documents, document_embeddings, metadatas)
+        
+        return vector_store
+    
+    def get_answer(self, question, context):
+        """Extract answer from context using QA model"""
+        inputs = self.tokenizer(
+            question,
+            context,
+            return_tensors="pt",
+            max_length=512,
+            truncation=True,
+            padding=True
+        )
+        
+        if torch.cuda.is_available():
+            inputs = {k: v.cuda() for k, v in inputs.items()}
+        
+        # Get model predictions
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        
+        # Get answer span
+        answer_start = torch.argmax(outputs.start_logits)
+        answer_end = torch.argmax(outputs.end_logits)
+        
+        # Convert to answer text
+        answer_tokens = inputs["input_ids"][0][answer_start:answer_end + 1]
+        answer = self.tokenizer.decode(answer_tokens)
+        
+        return answer.strip()
+    
+    def evaluate(self, df, k=3):
+        """Evaluate RAG system on SQuAD dataset"""
+        # Prepare vector store
+        vector_store = self.prepare_vector_store(df)
+        
+        predictions = []
+        references = []
+        
+        # Process each question
+        for _, row in tqdm(df.iterrows(), total=len(df)):
+            
+            # Embed the question into a query vector
+            question_embedding = self.embeddings.embed_query(row['question'])
+
+            # Retrieve relevant contexts
+            retrieved_docs = vector_store.similarity_search(
+                question_embedding,
+                k=k
+            )
+            
+            # Combine retrieved contexts
+            combined_context = " ".join([doc.page_content for doc in retrieved_docs])
+            
+            # Get model's answer
+            predicted_answer = self.get_answer(row['question'], combined_context)
+            predictions.append(predicted_answer)
+            references.append(row['answers'])
+        
+        # Calculate metrics
+        exact_match = self.exact_match_metric.compute(
+            predictions=predictions,
+            references=references
+        )
+        
+        return {
+            'exact_match': exact_match,
+            'predictions': predictions
+        }
+
+def main():
+    # Load SQuAD dataset
+    df = pd.read_csv("/home/bizon/Desktop/lightning/finetuning/squad_dataset.csv")
+    df = df[0:100]
+
+    # Initialize evaluator
+    evaluator = SQuADRAGEvaluator(
+        model_path="/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct",
+    )
+    
+    # Run evaluation
+    results = evaluator.evaluate(df)
+    
+    print(f"Exact Match Score: {results['exact_match']:.4f}")
+    
+    # Save predictions
+    df['rag_predictions'] = results['predictions']
+    df.to_csv('squad_rag_results.csv', index=False)
+
+if __name__ == "__main__":
+    main()

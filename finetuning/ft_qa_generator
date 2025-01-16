@@ -1,0 +1,142 @@
+# generate question-answer pairs for fine-tuning 
+import json
+import random
+from typing import List, Dict, Tuple
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+from transformers import AutoTokenizer, AutoModelForQuestionAnswering
+import torch
+
+class DocumentQAGenerator:
+    def __init__(self, model_name="/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct"):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForQuestionAnswering.from_pretrained(model_name)
+        
+        nltk.download('punkt')
+        nltk.download('punkt_tab')
+
+        self.instructions = [
+            "Answer the following question based on the provided context:",
+            "Given the context, please answer this question:",
+            "Based on the provided information, answer this question:"
+        ]
+
+    def preprocess_document(self, text: str) -> List[str]:
+        # Split into paragraphs and sentences
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+        sentences = []
+        for para in paragraphs:
+            sentences.extend(sent_tokenize(para))
+        
+        # Group sentences into context windows
+        contexts = []
+        current_context = []
+        current_length = 0
+        
+        for sentence in sentences:
+            tokens = word_tokenize(sentence)
+            if current_length + len(tokens) > 300:  # Max context length
+                if current_context:
+                    contexts.append(' '.join(current_context))
+                current_context = [sentence]
+                current_length = len(tokens)
+            else:
+                current_context.append(sentence)
+                current_length += len(tokens)
+        
+        if current_context:
+            contexts.append(' '.join(current_context))
+        
+        return contexts
+
+    def generate_question(self, context: str, answer: str) -> str:
+        # Generate question using the answer span
+        inputs = self.tokenizer.encode_plus(
+            answer, context,
+            add_special_tokens=True,
+            max_length=512,
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            start_scores = outputs.start_logits
+            end_scores = outputs.end_logits
+        
+        # Use model output to craft question
+        answer_words = word_tokenize(answer)
+        question_type = random.choice(["what", "how", "why"])
+        
+        if question_type == "what":
+            question = f"What {answer_words[-1]} is described in the text?"
+        elif question_type == "how":
+            question = f"How does {' '.join(answer_words[:3])} relate to the topic?"
+        else:
+            question = f"Why is {' '.join(answer_words[:3])} important in this context?"
+        
+        return question
+
+    def extract_potential_answers(self, context: str) -> List[str]:
+        sentences = sent_tokenize(context)
+        potential_answers = []
+        
+        for sentence in sentences:
+            if len(word_tokenize(sentence)) > 5 and len(word_tokenize(sentence)) < 50:
+                potential_answers.append(sentence)
+        
+        return potential_answers
+
+    def generate_qa_pair(self, context: str) -> Tuple[str, str]:
+        potential_answers = self.extract_potential_answers(context)
+        if not potential_answers:
+            return None, None
+        
+        answer = random.choice(potential_answers)
+        question = self.generate_question(context, answer)
+        
+        return question, answer
+
+    def generate_dataset(self, documents: List[str], num_examples_per_doc: int) -> Dict:
+        all_examples = []
+        
+        for doc in documents:
+            contexts = self.preprocess_document(doc)
+            
+            for _ in range(num_examples_per_doc):
+                context = random.choice(contexts)
+                question, answer = self.generate_qa_pair(context)
+                
+                if question and answer:
+                    example = {
+                        "instruction": random.choice(self.instructions),
+                        "input": question,
+                        "output": answer,
+                        "context": context
+                    }
+                    all_examples.append(example)
+        
+        random.shuffle(all_examples)
+        train_split = int(len(all_examples) * 0.80)
+        
+        return {
+            "train": all_examples[:train_split],
+            "validation": all_examples[train_split:]
+        }
+
+def save_dataset(dataset: Dict, filename: str):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(dataset, f, indent=2)
+
+def main(documents: List[str], num_examples_per_doc: int = 10):
+    generator = DocumentQAGenerator()
+    dataset = generator.generate_dataset(documents, num_examples_per_doc)
+    save_dataset(dataset, 'document_qa_dataset.json')
+    
+    print(f"Generated {len(dataset['train'])} training and {len(dataset['validation'])} validation examples")
+
+if __name__ == "__main__":
+    # Example usage
+    documents = ["text"]
+    main(documents)
+

@@ -5,8 +5,8 @@ from llmcompressor.modifiers.quantization import GPTQModifier
 import random
 
 
-MODEL_ID = r"/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B"
-QUANT = r"/home/bizon/Desktop/models/quantized/Llama-3.1-8B-W4A16"
+MODEL_ID = r"/home/bizon/Desktop/models/llama3.1/Llama-3.1-70B"
+QUANT = r"/home/bizon/Desktop/models/quantized/Llama-3.1-70B-Instruct-W8A16"
 
 num_samples = 256
 max_seq_len = 8192
@@ -20,15 +20,15 @@ ds = Dataset.from_dict({"input_ids": input_ids, "attention_mask": attention_mask
 
 recipe = GPTQModifier(
   targets="Linear",
-  scheme="W4A16",
+  scheme="W8A16",
   ignore=["lm_head"],
-  dampening_frac=0.01,
+  dampening_frac=0.01
 )
 
 model = SparseAutoModelForCausalLM.from_pretrained(
   MODEL_ID,
   device_map="auto",
-  trust_remote_code=True,
+  trust_remote_code=True
 )
 
 oneshot(
@@ -36,6 +36,6 @@ oneshot(
   dataset=ds,
   recipe=recipe,
   max_seq_length=max_seq_len,
-  num_calibration_samples=num_samples,
+  num_calibration_samples=num_samples
 )
 model.save_pretrained(QUANT)

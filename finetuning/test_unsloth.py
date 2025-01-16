@@ -6,7 +6,7 @@ from datasets import load_dataset
 import torch
 
 # set variables 
-model_name = "/media/bizon/53Drive/Llama-3.1-8B-Instruct"
+model_name = "/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct" 
 max_seq_length = 2048 
 dtype = None 
 load_in_4bit = True 
@@ -102,7 +102,7 @@ trainer = SFTTrainer(
 trainer.train()
 
 # alpaca_prompt = copied from above
-inference_model, inference_tokenizer = model2, tokenizer2
+inference_model, inference_tokenizer = model, tokenizer
 FastLanguageModel.for_inference(inference_model) # Enable native 2x faster inference
 inputs = tokenizer(
 [
@@ -114,4 +114,3 @@ inputs = tokenizer(
 
 outputs = inference_model.generate(**inputs, max_new_tokens = 64, temperature = 0.5, use_cache = True)
 inference_tokenizer.batch_decode(outputs)
-

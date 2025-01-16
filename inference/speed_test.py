@@ -2,21 +2,21 @@ import time
 from vllm import LLM, SamplingParams
 
 # Parameters
-number_gpus = 4
+number_gpus = 1
 max_model_len = 8192
 sampling_params = SamplingParams(temperature=0.6, top_p=0.9, max_tokens=256)
-runs = 100  # Number of runs
+runs = 1  # Number of runs
 
 # Prepare prompt
 prompts = [
-    "My dream vacation is"
+    "Hello world!"
 ]
 
 # Paths to model
-model_id = r"/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B"
+model_id = "/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct"
 
 # Initialize model
-llm = LLM(model=model_id, tensor_parallel_size=number_gpus, max_model_len=max_model_len, gpu_memory_utilization=0.95)
+llm = LLM(model=model_id, tensor_parallel_size=number_gpus, max_model_len=max_model_len)
 
 # Variables to store results
 unquantized_times = []
@@ -37,8 +37,11 @@ for i in range(runs):
 
     print(f"Unquantized Run {i + 1}: {tokens_per_second:.2f} tokens/s, Total tokens produced: {tokens_generated}, Total Time Taken: {elapsed_time}")
 
+    generated_text = output[0].outputs[0].text
+    print(f"Generated text: {generated_text!r}\n")
+
     if i == (runs - 1):
 
         average_unquantized_tps = sum(unquantized_times) / len(unquantized_times)
-        print(f"\nAverage tokens/s for Unquantized Model: {average_unquantized_tps:.2f}")
+        print(f"\nAverage tokens/s for Model {model_id}: {average_unquantized_tps:.2f}")
 

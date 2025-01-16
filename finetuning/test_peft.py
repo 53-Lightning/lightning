@@ -19,7 +19,7 @@ tokenizer = AutoTokenizer.from_pretrained("/home/bizon/Desktop/models/llama3.1/L
 model = AutoModelForCausalLM.from_pretrained(
     "/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct", 
     # quantization_config=quantization_config, # quantize model 
-    device_map={"":0}
+    device_map={"":2}
 )
 
 # padding token 
@@ -49,20 +49,20 @@ collator = DataCollatorForCompletionOnlyLM(response_template=response_template, 
 
 # load dataset
 ds_t = load_dataset("ayaan04/shakespeare-text", split = "train").select(range(0,1000)) 
-ds_v = load_dataset("ayaan04/shakespeare-text", split = "train").select(range(1000,1200))
+ds_v = load_dataset("ayaan04/shakespeare-text", split = "train").select(range(1000,1250))
 
 # LoRA
 lora_config = LoraConfig(
     r=32,  # rank for matrix decomposition, where higher increases number of learned parameters
-    lora_alpha=16, # scaling factor, where higher allows model to adapt more aggressively 
+    lora_alpha=8, # scaling factor, where higher allows model to adapt more aggressively 
     target_modules=[
         "self_attn.q_proj",
         "self_attn.k_proj",
         "self_attn.v_proj",
         "self_attn.o_proj",
-        # "mlp.gate_proj",
-        # "mlp.up_proj",
-        # "mlp.down_proj"
+        "mlp.gate_proj",
+        "mlp.up_proj",
+        "mlp.down_proj"
     ],
     lora_dropout=0.1,
     bias='none',
@@ -72,10 +72,10 @@ lora_config = LoraConfig(
 # wrap base model and peft config 
 # model2 = prepare_model_for_kbit_training(model)
 model2 = get_peft_model(model, lora_config)
-# model2.print_trainable_parameters() # trainable params: 83,886,080 || all params: 8,114,212,864 || trainable%: 1.0338
+model2.print_trainable_parameters() # trainable params: 83,886,080 || all params: 8,114,212,864 || trainable%: 1.0338
 
 # where to store output 
-OUTPUT_DIR = "/home/bizon/Desktop/models/fine-tuned/12-6-24/run1"
+OUTPUT_DIR = "/home/bizon/Desktop/models/fine-tuned/12-6-24/run2"
 
 sft_config = SFTConfig(
     output_dir=OUTPUT_DIR, 
@@ -93,7 +93,7 @@ sft_config = SFTConfig(
     fp16=False,  # also try bf16=True
     save_strategy='steps',
     warmup_ratio=0.1,  # learning rate warmup
-    save_total_limit=5, # number of checkpoints saved to folder 
+    save_total_limit=2, # number of checkpoints saved to folder 
     lr_scheduler_type="cosine",  # scheduler
     save_safetensors=True,  # saving to safetensors
     dataset_kwargs={
@@ -102,14 +102,13 @@ sft_config = SFTConfig(
     },
  )
 
-
-
 # set up trainer
 trainer_sft = SFTTrainer(
     model=model2,
     args=sft_config,
     train_dataset=ds_t,
     eval_dataset=ds_v,
+    tokenizer=tokenizer,
     formatting_func=formatting_prompts_func,
     data_collator=collator)
 
@@ -117,22 +116,21 @@ trainer_sft = SFTTrainer(
 trainer_sft.train()
 
 # save model 
-trainer_sft.save_model(OUTPUT_DIR)
-trainer_sft.save_pretrained(OUTPUT_DIR)
+trainer_sft.save_model(OUTPUT_DIR) # should be saved already 
 
-# loading and merging the model 
-NEW_MODEL = "/home/bizon/Desktop/models/fine-tuned/12-5-24/run2/checkpoint-52"
+# reloading and merging the model 
+NEW_MODEL = "/home/bizon/Desktop/models/fine-tuned/12-6-24/run1/saved_model"
 
 # load trained/resized tokenizer
 tokenizer = AutoTokenizer.from_pretrained(NEW_MODEL)
 
-# load the raw model *** NEED TO FIX***
+# load the raw model ** might need to fix **
 ft_model = AutoModelForCausalLM.from_pretrained("/home/bizon/Desktop/models/llama3.1/Llama-3.1-8B-Instruct")
 ft_model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
 ft_model = PeftModel.from_pretrained(ft_model, NEW_MODEL)
 ft_model = ft_model.merge_and_unload()
 
-input = "Hello how are you today?"
+input = "Would you like to join me for dinner later this evening?"
 
 # prepare input in the same format as training
 input_prompt = f"### Input: {input} \n ### Response:"
@@ -145,8 +143,8 @@ outputs = ft_model.generate(
     input_ids=inputs.input_ids,
     attention_mask=inputs.attention_mask,
     max_new_tokens=100,    
-    temperature=0.9,  
-    top_p=0.9,
+    temperature=0.5,  
+    top_p=0.5,
     pad_token_id=tokenizer.eos_token_id
 )
 
